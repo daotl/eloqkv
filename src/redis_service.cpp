@@ -31,6 +31,9 @@
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 
 #include <atomic>
 #include <chrono>
@@ -371,6 +374,73 @@ namespace EloqKV
 {
 constexpr char SEC_LOCAL[] = "local";
 const auto NUM_VCPU = std::thread::hardware_concurrency();
+
+// Function to resolve IP aliases and network names
+std::string ResolveNetworkAddress(const std::string& address) {
+    // Check if it's already an IP address
+    struct sockaddr_in sa;
+    if (inet_pton(AF_INET, address.c_str(), &(sa.sin_addr)) == 1) {
+        return address; // Already a valid IP
+    }
+    
+    // Try to resolve as hostname
+    struct hostent* host_entry = gethostbyname(address.c_str());
+    if (host_entry == nullptr) {
+        LOG(WARNING) << "Failed to resolve address: " << address;
+        return address; // Return original if resolution fails
+    }
+    
+    // Get the first IP address
+    if (host_entry->h_addr_list[0] != nullptr) {
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, host_entry->h_addr_list[0], ip_str, INET_ADDRSTRLEN);
+        return std::string(ip_str);
+    }
+    
+    return address; // Return original if no IP found
+}
+
+// Function to check if two addresses are equivalent (considering aliases)
+bool IsAddressEquivalent(const std::string& addr1, const std::string& addr2) {
+    std::string resolved1 = ResolveNetworkAddress(addr1);
+    std::string resolved2 = ResolveNetworkAddress(addr2);
+    
+    // Also check for common Docker network names that might resolve to the same container
+    if (addr1 == "0.0.0.0" || addr2 == "0.0.0.0") {
+        // 0.0.0.0 means "listen on all interfaces", so it should match any local IP
+        return true;
+    }
+    
+    return resolved1 == resolved2;
+}
+
+// Function to get local IP addresses
+std::vector<std::string> GetLocalIPAddresses() {
+    std::vector<std::string> local_ips;
+    struct ifaddrs *ifap, *ifa;
+    
+    if (getifaddrs(&ifap) == -1) {
+        LOG(ERROR) << "Failed to get local network interfaces";
+        return local_ips;
+    }
+    
+    for (ifa = ifap; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in* sin = (struct sockaddr_in*)ifa->ifa_addr;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(sin->sin_addr), ip_str, INET_ADDRSTRLEN);
+            
+            // Skip loopback and non-configured interfaces
+            std::string ip(ip_str);
+            if (ip != "127.0.0.1" && !ip.empty()) {
+                local_ips.push_back(ip);
+            }
+        }
+    }
+    
+    freeifaddrs(ifap);
+    return local_ips;
+}
 
 int databases;
 std::string requirepass;
@@ -865,17 +935,48 @@ bool RedisServiceImpl::Init(brpc::Server &brpc_server)
         }
     }
 
+    // Check if local_ip is 0.0.0.0 (listen on all interfaces)
+    // Skip check for common network scenarios where listening PORT:IP does not match
+    // the external one (like when running inside a container).
+    if (local_ip == "0.0.0.0") {
+        return true;
+    }
+
     uint32_t node_id = 0;
     uint32_t native_ng_id = 0;
+    // Get local IP addresses for comparison
+    std::vector<std::string> local_ips = GetLocalIPAddresses();
+
     // check whether this node is in cluster.
     bool found = false;
+
     for (auto &pair : ng_configs)
     {
         auto &ng_nodes = pair.second;
         for (size_t i = 0; i < ng_nodes.size(); i++)
         {
-            if (ng_nodes[i].host_name_ == local_ip &&
-                ng_nodes[i].port_ == local_tx_port)
+            // Check if hostnames/IPs are equivalent (supports aliases and Docker network names)
+            bool host_matches = false;
+            
+            // Direct match
+            if (ng_nodes[i].host_name_ == local_ip) {
+                host_matches = true;
+            }
+            // Check address equivalence with resolution
+            else if (IsAddressEquivalent(ng_nodes[i].host_name_, local_ip)) {
+                host_matches = true;
+            }
+            // Check if cluster config IP matches any local IP
+            else {
+                for (const auto& local_ip_addr : local_ips) {
+                    if (IsAddressEquivalent(ng_nodes[i].host_name_, local_ip_addr)) {
+                        host_matches = true;
+                        break;
+                    }
+                }
+            }
+
+            if (host_matches && ng_nodes[i].port_ == local_tx_port)
             {
                 node_id = ng_nodes[i].node_id_;
                 found = true;
