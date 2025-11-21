@@ -12,9 +12,17 @@ USER eloquser
 WORKDIR /home/eloquser
 
 ARG ELOQKV
-RUN set -eux; \
-    case $(uname -m) in amd64 | x86_64) ARCH=amd64 ;; arm64 | aarch64) ARCH=arm64 ;; *) ARCH= $(uname -m) ;; esac; \
-    curl "https://download.eloqdata.com/eloqkv/rocksdb/eloqkv-${ELOQKV}-ubuntu24-${ARCH}.tar.gz" | tar xvz
+# RUN set -eux; \
+#     case $(uname -m) in amd64 | x86_64) ARCH=amd64 ;; arm64 | aarch64) ARCH=arm64 ;; *) ARCH= $(uname -m) ;; esac; \
+#     curl "https://download.eloqdata.com/eloqkv/rocksdb/eloqkv-${ELOQKV}-ubuntu24-${ARCH}.tar.gz" | tar xvz
+
+# Modify for local building
+COPY lib /home/eloquser/EloqKV/lib
+COPY build/eloqkv /home/eloquser/EloqKV/bin/
+COPY build/eloqkv_to_aof /home/eloquser/EloqKV/bin/
+COPY build/eloqkv_to_rdb /home/eloquser/EloqKV/bin/
+COPY bin/eloqkv-cli /home/eloquser/EloqKV/bin/
+COPY bin/host_manager /home/eloquser/EloqKV/bin/
 
 ENV PATH="$PATH:/home/eloquser/EloqKV/bin"
 EXPOSE 6379
